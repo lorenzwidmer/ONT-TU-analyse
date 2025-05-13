@@ -2,6 +2,7 @@ import subprocess
 import argparse
 import tempfile
 import shutil
+import itertools
 
 from pathlib import Path
 from collections import namedtuple
@@ -15,7 +16,7 @@ import pandas as pd
 import numpy as np
 
 Sequence = namedtuple('Sequence', ['name', 'seq', 'alignments'])
-Alignment = namedtuple('Alignment', ['name', 'part', 'interval', 'coverage', 'score'])
+Alignment = namedtuple('Alignment', ['name', 'part', 'positions', 'posnums', 'interval', 'direction', 'coverage', 'score'])
 
 parser = argparse.ArgumentParser(description='''Script to find muCAR receptors in NanoPore Sequencing files.''', 
 	prog='python3 -m sbo-builder')
@@ -25,9 +26,9 @@ parser.add_argument('-o', '--output', type=Path, default=Path('./'),
 	help='Name of the output file.')
 parser.add_argument('-a', '--annotate', dest='annotate', action='store_true',
 	help='Create zip file with all annotated sequences.')
-parser.add_argument('-p', '--parts', dest='parts', type=str, default='start,promo,rbs,signal,ntag(o),cds,ctag,stop,term,end(o)',
-	help='Parts required for a valid receptor.')
-parser.add_argument('-p', '--primer', dest='parts', type=str, default='gaattcgcggccgcttctagag,AAAAA',
+parser.add_argument('-b', '--bidir', dest='annotate', action='store_true',
+	help='Bi-directional reads.')
+parser.add_argument('-p', '--parts', dest='parts', type=str, default='promo,rbs,signal,ntag,cds,ctag,stop,term',
 	help='Parts required for a valid receptor.')
 
 args = parser.parse_args()
@@ -51,11 +52,21 @@ def reorderAlignments(alignments, order):
 	
 	return alignments[start:] + alignments[:start]
 
+def splitTUs(alignment, jump=-1):
+	positions = [a.positions for a in alignment]
+	positions = np.array(list(itertools.chain.from_iterable(positions)))
+
+	splits = (np.argwhere(np.diff(positions) < jump).flatten() + 1).tolist()
+	splits = [0] + splits + [len(alignment)]
+
+	return [alignment[splits[i - 1]:splits[i]] for i in range(1, len(splits))]
+
 root = Path(__file__).parent
 folder = root / 'blast'
+args.output.mkdir(exist_ok=True)
 
 headers = ['qseqid', 'sseqid', 'pident', 'length', 'mismatch', 'gapopen', 'qstart', 'qend', 'sstart', 'send', 'evalue', 'bitscore', 'qcovs']
-primerF, primerR = args.primer.split(',')
+part_order = {p.strip():i for i, p in enumerate(args.parts.split(','))}
 
 sequences = {}
 for fastq in args.fastqs:
@@ -63,87 +74,75 @@ for fastq in args.fastqs:
 		fasta_sequences = SeqIO.parse(f, 'fastq')
 
 		for fasta in fasta_sequences:
-			start = max(0, fasta.find('primerF'))
-			end = max(0, fasta.find('primerR'))
-
-			if start == 0 and end == 0:
-				print(f'Skipped {fasta.id}')
-				continue
-			elif end < start:
-				newy = fasta[start:] + fasta[0:end]
-			else:
-				newy = fasta[start:end]
-
 			fasta.id = f'{fasta.id}_{len(sequences)}'
 			fasta.annotations["molecule_type"] = "DNA"
 			sequences[fasta.id] = Sequence(fasta.id, fasta, [])
 
-with tempfile.TemporaryDirectory() as tempdir:
-	tempdir = Path(tempdir)
-	with (tempdir / 'plasmids.fasta').open("w") as f:
-		SeqIO.write([sequence.seq for sequence in sequences.values()], f, "fasta")
+if not (args.output / 'alignments.csv').is_file():
+	with tempfile.TemporaryDirectory() as tempdir:
+		tempdir = Path(tempdir)
 
-	if not (tempdir / 'plasmids.ndb').is_file():
-		subprocess.run([
-			'makeblastdb', '-in', 'plasmids.fasta', '-dbtype', 'nucl', '-parse_seqids', '-out', 'plasmids', '-title', 'no-idea'
-		], cwd=tempdir)
+		with (tempdir / 'plasmids.fasta').open("w") as f:
+			SeqIO.write([sequence.seq for sequence in sequences.values()], f, "fasta")
 
-		subprocess.run([
-			'blastn', '-out', tempdir / 'alignments.csv', '-outfmt', ' '.join(['6'] + headers),
-			'-max_target_seqs', str(len(sequences)),
-			'-query', root / 'parts.fasta', '-db', tempdir / 'plasmids'
-		], cwd=tempdir)
+		if not (tempdir / 'plasmids.ndb').is_file():
+			subprocess.run([
+				'makeblastdb', '-in', 'plasmids.fasta', '-dbtype', 'nucl', '-parse_seqids', '-out', 'plasmids', '-title', 'no-idea'
+			], cwd=tempdir)
 
-	results = pd.read_csv(tempdir / 'alignments.csv', sep="\t", names=headers)
-	shutil.copy(tempdir / 'alignments.csv', args.output / 'alignments.csv')
+			subprocess.run([
+				'blastn', '-out', tempdir / 'alignments.csv', '-outfmt', ' '.join(['6'] + headers),
+				'-max_target_seqs', str(len(sequences)),
+				'-query', root / 'parts.fasta', '-db', tempdir / 'plasmids'
+			], cwd=tempdir)
+
+		results = pd.read_csv(tempdir / 'alignments.csv', sep="\t", names=headers)
+		shutil.copy(tempdir / 'alignments.csv', args.output / 'alignments.csv')
+else:
+	results = pd.read_csv(args.output / 'alignments.csv', sep="\t", names=headers)
 
 for i, row in results.iterrows():
 	name, part = row['qseqid'].split('|')
-	modi = -2 * (row['sstart'] > row['send']) + 1
+	positions = [part_order.get(x.strip(), 0) for x in part.split('-')]
+
+	if row['sstart'] > row['send']:
+		interval = pd.Interval(row['send'], row['sstart'])
+	else:
+		interval = pd.Interval(row['sstart'], row['send'])
 
 	alignment = Alignment(
-		name.replace('_', ' '), part,
-		pd.Interval(row['sstart'] * modi, row['send'] * modi),
+		name.replace('_', ' '), part, positions,
+		''.join([str(p) for p in positions]), interval,
+		row['sstart'] > row['send'],
 		int(row['qcovs']), row['bitscore']
 	)
 
 	sequences[row['sseqid']].alignments.append(alignment)
 
-parts_order = {}
-parts_required = set()
-for o, part in enumerate(args.parts.split(',')):
-	if '(o)' in part:
-		part = part.replace('(o)', '').strip()
-	else:
-		parts_required.add(part)
-	
-	parts_order[part.strip()] = o
-
 constructs = []
 parts = []
 for sequence in sequences.values():
 	filtered = []
-	parts_filtered = []
 
 	sequence.alignments.sort(key=lambda x: (x.score, x.coverage), reverse=True)
 	for alignment in sequence.alignments:
 		olaps = np.array([overlap(alignment.interval, a.interval) for a in filtered])
 		if not any(olaps > (0.5 * alignment.interval.length)):
-			parts_filtered += alignment.part.split('-')
 			filtered.append(alignment)
 
 			sequence.seq.features.append(SeqFeature(makeFeatureLocation(alignment), id=alignment.name, type="gene", qualifiers={'label': alignment.name}))
 
-	missing_parts = len(parts_required - set(parts_filtered))
-
 	filtered.sort(key=lambda a: a.interval.left)
-	for alignment in filtered:
-		parts.append((sequence.name, missing_parts, alignment.coverage, alignment.score, alignment.part, alignment.name))
 
-	filtered = reorderAlignments(filtered, parts_order)
-	constructs.append((sequence.name, len(sequence.seq), missing_parts,
-		'|'.join([a.name for a in filtered]))
-	)
+	splitty = splitTUs(filtered)
+	for tu, split in enumerate(splitty):
+		for alignment in split:
+			parts.append((sequence.name, f'TU{tu+1}', alignment.coverage, alignment.score, alignment.part, alignment.name))
+
+		constructs.append((sequence.name, f'TU{tu+1}', len(sequence.seq),
+			''.join([f.posnums for f in split]),
+			'|'.join([f.name for f in split])
+		))
 
 if args.annotate:
 	with ZipFile(args.output / f'annotated.zip', 'w') as zip:
@@ -151,13 +150,10 @@ if args.annotate:
 			with zip.open(f'{sequence.name}.gb', 'w') as f:
 				SeqIO.write(sequence.seq, TextIOWrapper(f), "gb")
 
-constructs = pd.DataFrame(constructs, columns=('read', 'length', 'missing_parts', 'name'))
+constructs = pd.DataFrame(constructs, columns=('read', 'TU', 'length', 'parts', 'name'))
 constructs.to_csv(args.output / f'constructs.csv')
 
-num_constructs = len(pd.unique(constructs[constructs.name != ''].read))
-complete = len(pd.unique(constructs[constructs.missing_parts < 1].read))
-
-parts = pd.DataFrame(parts, columns=('read', 'missing_parts', 'coverage', 'score', 'type', 'name'))
+parts = pd.DataFrame(parts, columns=('read', 'TU', 'coverage', 'score', 'type', 'name'))
 parts.to_csv(args.output / f'parts.csv')
 
-print(f'Found {num_constructs} constructs ({complete} complete) in {len(sequences)} sequences.')
+print(f'Found {len(constructs)} constructs in {len(sequences)} sequences.')
