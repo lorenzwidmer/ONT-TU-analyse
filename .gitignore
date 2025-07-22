@@ -1,5 +1,7 @@
 output/
-plasmids/
+plasmid/
+raw/
+parts/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -15,6 +15,6 @@ cutadapt -g "$FWD;min_overlap=$FWD_LEN...$RVS_RC;min_overlap=$RVS_LEN" -e 0.15 -
 cutadapt -g "$RVS;min_overlap=$RVS_LEN...$FWD_RC;min_overlap=$FWD_LEN" -e 0.15 --cores=$CPUS --discard-untrimmed --action=trim --report=minimal -o $TMPD/cutadapt_rvs.fastq.gz $TMPD/duplicated.fastq.gz
 
 seqkit -j $CPUS -t dna -o $TMPD/cutadapt_rvs.rc.fastq.gz seq -r -p $TMPD/cutadapt_rvs.fastq.gz
-cat $TMPD/cutadapt_fwd.fastq.gz $TMPD/cutadapt_rvs.rc.fastq.gz > $4
+zcat $TMPD/cutadapt_fwd.fastq.gz $TMPD/cutadapt_rvs.rc.fastq.gz > $4
 
 rm -rf $TMPD
