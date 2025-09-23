@@ -15,19 +15,19 @@ class Part:
 
 class Alignment:
     def __init__(self, row, part_order={}):
-        name, part = row['qseqid'].split('|')
+        name, part = row['sseqid'].replace('gnl|', '').split('|')
         
         self.name = name.replace('_', ' ')
         self.part = part
         self.parts = [Part(p, part_order) for p in part.split('-')]
         
-        self.direction = row['sstart'] > row['send']
-        if row['sstart'] > row['send']:
-            self.interval = pd.Interval(row['send'], row['sstart'])
+        self.direction = row['qstart'] > row['qend']
+        if row['qstart'] > row['qend']:
+            self.interval = pd.Interval(row['qend'], row['qstart'])
         else:
-            self.interval = pd.Interval(row['sstart'], row['send'])
+            self.interval = pd.Interval(row['qstart'], row['qend'])
         
-        self.coverage = int(row['qcovs'])
+        self.coverage = int(row['scovs'])
         self.score = row['bitscore']
 
     def merge(self, other):
@@ -81,14 +81,14 @@ class Sequence:
             self.alignments = filtered
 
     def splitTUs(self, jump=-1):
-        positions = np.array([a.parts[0].number for a in self.alignments])
+        positions = np.array([(a.parts[0].number, a.parts[-1].number) for a in self.alignments]).flatten()
 
-        splits = (np.argwhere(np.diff(positions) <= jump).flatten() + 1).tolist()
+        splits = ((np.argwhere(np.diff(positions) <= jump).flatten() + 1) / 2).tolist()
         splits = [0] + splits + [len(self.alignments)]
 
         for i in range(1, len(splits)):
             seq = Sequence(self.name, self.sequence)
-            seq.alignments = self.alignments[splits[i - 1]:splits[i]]
+            seq.alignments = self.alignments[int(splits[i - 1]):int(splits[i])]
             yield seq
 
     def partDict(self, filter=None):

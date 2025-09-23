@@ -37,7 +37,7 @@ root = Path(__file__).parent
 folder = root / 'blast'
 args.output.mkdir(exist_ok=True)
 
-headers = ['qseqid', 'sseqid', 'pident', 'length', 'mismatch', 'gapopen', 'qstart', 'qend', 'sstart', 'send', 'evalue', 'bitscore', 'qcovs']
+headers = ['qseqid', 'sseqid', 'pident', 'length', 'slen', 'mismatch', 'gapopen', 'qstart', 'qend', 'evalue', 'bitscore']
 part_order = {p.strip():i for i, p in enumerate(args.parts.split(','))}
 
 part_filter = {k: set(f) for k, f in json.loads(args.filter).items()}
@@ -61,22 +61,27 @@ if not (args.output / 'alignments.csv').is_file():
 
 		if not (tempdir / 'plasmids.ndb').is_file():
 			subprocess.run([
-				'makeblastdb', '-in', 'plasmids.fasta', '-dbtype', 'nucl', '-parse_seqids', '-out', 'plasmids', '-title', 'no-idea'
+				'makeblastdb', '-in', args.partfile.resolve(), '-dbtype', 'nucl', '-parse_seqids', '-out', 'parts', '-title', 'no-idea'
 			], cwd=tempdir)
 
 			subprocess.run([
-				'blastn', '-out', tempdir / 'alignments.csv', '-outfmt', ' '.join(['6'] + headers),
+				'blastn', '-out', tempdir / 'raw_alignments.csv', '-outfmt', ' '.join(['6'] + headers),
 				'-max_target_seqs', str(len(sequences)),
-				'-query', args.partfile.resolve(), '-db', tempdir / 'plasmids'
+				'-task', 'blastn-short',
+				'-query', 'plasmids.fasta', '-db', tempdir / 'parts'
 			], cwd=tempdir)
 
-		results = pd.read_csv(tempdir / 'alignments.csv', sep="\t", names=headers)
-		shutil.copy(tempdir / 'alignments.csv', args.output / 'alignments.csv')
+		results = pd.read_csv(tempdir / 'raw_alignments.csv', sep="\t", names=headers)
+		shutil.copy(tempdir / 'raw_alignments.csv', args.output / 'raw_alignments.csv')
+		
+		results = results.assign(scovs = (100 * results.length / results.slen).astype(int))
+		results = results[(results.scovs > 90) & (results.pident > 95)]
+		results.sort_values(by=['scovs']).to_csv(args.output / 'alignments.csv', sep='\t', index=False, header=True)
 else:
-	results = pd.read_csv(args.output / 'alignments.csv', sep="\t", names=headers)
+	results = pd.read_csv(args.output / 'alignments.csv', sep="\t")
 
 for i, row in results.iterrows():
-	sequences[row['sseqid']].add(Alignment(row, part_order))
+	sequences[row['qseqid']].add(Alignment(row, part_order))
 
 constructs = []
 parts = []

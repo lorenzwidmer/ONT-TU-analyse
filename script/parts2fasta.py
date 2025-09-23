@@ -15,10 +15,13 @@ parser.add_argument('output', metavar='OUT', type=Path,
 
 args = parser.parse_args()
 
+outtype = args.output.suffix
+
 bsaI_regex = re.compile('GGTCTC[ACGT]([ACGT]{4})([ACGT]+)([ACGT]{4})[ACGT]GAGACC', flags=re.IGNORECASE)
 lvl0 = ["CTAT", "ACTT", "CATA", "GGAA", "AGTG", "ACCG", "GGCT", "CGAC", "TGTT"]
 lvl0_dict = {overhang:i for i,overhang in enumerate(lvl0)}
 partnames = ['promo', 'rbs', 'signal', 'ntag', 'cds', 'ctag', 'stop', 'term']
+
 output = []
 
 with args.input.open(newline='') as csvfile:
@@ -39,10 +42,17 @@ with args.input.open(newline='') as csvfile:
 
             parts = '-'.join(partnames[start:end])
 
-            output.append(f">{name}|{parts}\n")
-            output.append(f"{match.group(2)}\n")
+            if outtype.startswith('.fa'):
+                output.append(f">{name}|{parts}\n")
+                output.append(f"{match.group(2)}\n")
+            else:
+                output.append([name, seq, parts, author])
         else:
             print(f'{fullname} contains no bsai')
 
 with args.output.open('w') as f:
-    f.writelines(output)
+    if outtype.startswith('.fa'):
+        f.writelines(output)
+    else:
+        spamwriter = csv.writer(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        spamwriter.writerows(output)
