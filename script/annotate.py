@@ -3,6 +3,7 @@ import argparse
 import tempfile
 import shutil
 import json
+import multiprocessing
 
 from pathlib import Path
 from zipfile import ZipFile
@@ -12,7 +13,7 @@ from Bio import SeqIO
 
 import pandas as pd
 
-from classes import Sequence, Alignment 
+from classes import Sequence, Alignment, FastxFile, BlastSearch
 
 parser = argparse.ArgumentParser(description='''Script to annotate Microsynth full plasmid seq ONT reads. The minimal input is a parts.fasta file with a list of possible sequences in the library and a clean raw-reads.fastq file.''', 
 	prog='python3 annotate.py')
@@ -24,12 +25,17 @@ parser.add_argument('-o', '--output', type=Path, default=Path('./'),
 	help='Name of the output file.')
 parser.add_argument('-a', '--annotate', dest='annotate', action='store_true',
 	help='Create zip file with all annotated sequences.')
-parser.add_argument('-b', '--bidir', dest='annotate', action='store_true',
-	help='Bi-directional reads.')
 parser.add_argument('-p', '--parts', dest='parts', type=str, default='promo,rbs,signal,ntag,cds,ctag,stop,term',
 	help='Part categories and their order in the TU.')
 parser.add_argument('-f', '--filter', type=str, default='{"TU1":[0,1,2,5], "TU2":[0,1,2,4]}',
 	help='Part filter applied to the parts in the cnstruct.')
+
+parser.add_argument('-b', '--bidir', dest='annotate', action='store_true',
+	help='Bi-directional reads.')
+parser.add_argument('--scovs', dest='scovs', type=int, default=90,
+	help='Minimal percent of part coverage to be kept as a possible match. Match is kept if either scovs or mcovs are true.')
+parser.add_argument('--mcovs', dest='mcovs', type=int, default=200,
+	help='Minimal length of alignment to be kept as a possible match. Match is kept if either scovs or mcovs are true.')
 
 args = parser.parse_args()
 
@@ -37,14 +43,12 @@ root = Path(__file__).parent
 folder = root / 'blast'
 args.output.mkdir(exist_ok=True)
 
-headers = ['qseqid', 'sseqid', 'pident', 'length', 'slen', 'mismatch', 'gapopen', 'qstart', 'qend', 'evalue', 'bitscore']
 part_order = {p.strip():i for i, p in enumerate(args.parts.split(','))}
-
 part_filter = {k: set(f) for k, f in json.loads(args.filter).items()}
 
 sequences = {}
 for fastq in args.fastqs:
-	with fastq.open('r') as f:
+	with FastxFile(fastq) as f:
 		fasta_sequences = SeqIO.parse(f, 'fastq')
 
 		for fasta in fasta_sequences:
@@ -59,23 +63,13 @@ if not (args.output / 'alignments.csv').is_file():
 		with (tempdir / 'plasmids.fasta').open("w") as f:
 			SeqIO.write([sequence.sequence for sequence in sequences.values()], f, "fasta")
 
-		if not (tempdir / 'plasmids.ndb').is_file():
-			subprocess.run([
-				'makeblastdb', '-in', args.partfile.resolve(), '-dbtype', 'nucl', '-parse_seqids', '-out', 'parts', '-title', 'no-idea'
-			], cwd=tempdir)
-
-			subprocess.run([
-				'blastn', '-out', tempdir / 'raw_alignments.csv', '-outfmt', ' '.join(['6'] + headers),
-				'-max_target_seqs', str(len(sequences)),
-				'-task', 'blastn-short',
-				'-query', 'plasmids.fasta', '-db', tempdir / 'parts'
-			], cwd=tempdir)
-
-		results = pd.read_csv(tempdir / 'raw_alignments.csv', sep="\t", names=headers)
-		shutil.copy(tempdir / 'raw_alignments.csv', args.output / 'raw_alignments.csv')
+		parts = [r for r in SeqIO.parse(args.partfile, "fasta")]
+		shorty = BlastSearch('shorty', tempdir).run([p for p in parts if len(p.seq) <= 50], tempdir / 'plasmids.fasta', task='blastn-short', csvout=args.output / 'raw_shorty.csv', force=True)
+		longy = BlastSearch('longy', tempdir).run([p for p in parts if len(p.seq) > 50], tempdir / 'plasmids.fasta', task='blastn', csvout=args.output / 'raw_longy.csv', force=True)
 		
+		results = pd.concat([shorty, longy])
 		results = results.assign(scovs = (100 * results.length / results.slen).astype(int))
-		results = results[(results.scovs > 90) & (results.pident > 95)]
+		results = results[((results.scovs > args.scovs) | (results.length > args.mcovs)) & (results.pident > 95)]
 		results.sort_values(by=['scovs']).to_csv(args.output / 'alignments.csv', sep='\t', index=False, header=True)
 else:
 	results = pd.read_csv(args.output / 'alignments.csv', sep="\t")
@@ -87,6 +81,9 @@ constructs = []
 parts = []
 for sequence in sequences.values():
 	sequence.filter()
+
+	if len(sequence.alignments) <= 0:
+		continue
 
 	splitty = sequence.splitTUs()
 	for tu, split in enumerate(splitty):
